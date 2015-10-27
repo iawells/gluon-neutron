@@ -36,7 +36,7 @@ from neutron.i18n import _LE, _LI
 from neutron import policy
 from neutron import quota
 from neutron.quota import resource_registry
-
+from gluonclient import api as gluon_api
 
 LOG = logging.getLogger(__name__)
 
@@ -76,6 +76,7 @@ class Controller(object):
         self._policy_attrs = [name for (name, info) in self._attr_info.items()
                               if info.get('required_by_policy')]
         self._notifier = n_rpc.get_notifier('network')
+	self._gluon_api = None
         # use plugin's dhcp notifier, if this is already instantiated
         agent_notifiers = getattr(plugin, 'agent_notifiers', {})
         self._dhcp_agent_notifier = (
@@ -328,6 +329,8 @@ class Controller(object):
             else:
                 self._dhcp_agent_notifier.notify(context, data, methodname)
 
+
+
     def _send_nova_notification(self, action, orig, returned):
         if hasattr(self, '_nova_notifier'):
             self._nova_notifier.send_network_change(action, orig, returned)
@@ -401,6 +404,31 @@ class Controller(object):
                 # We need a way for ensuring that if it has been created,
                 # it is then deleted
 
+
+    def _tell_gluon(self, op, result):
+	# Gluon cares about nothing but ports.
+	if self._resource == 'port':
+	    if self._gluon_api is None:
+		self._gluon_api = gluon_api.NetworkServiceAPI('http://0:2704/', 'neutron', 'http://0:9696/') # TODO credentials one day, and self-reference (should look up in keystone?)
+
+	    def _tell_gluon_one(op, port):
+		if 'id' in port:
+		    LOG.debug('**************************** Port operation: %s on %s' % (op, port['id']))
+		    # TODO do stuff to talk to gluon with its API
+		    if op == self.CREATE:
+			self._gluon_api.notify_create(port['id'])
+		    else: # delete
+			self._gluon_api.notify_delete(port['id'])
+		else:
+		    LOG.debug('*** op with NO ID??? %s', repr(port))
+
+	    if self._collection in result:
+		for f in result[self._collection]:
+		    _tell_gluon_one(op, x) 
+	    else:
+		_tell_gluon_one(op, result[self._resource])
+
+
     @db_api.retry_db_errors
     def create(self, request, body=None, **kwargs):
         """Creates a new instance of the requested entity."""
@@ -469,6 +497,7 @@ class Controller(object):
             self._send_dhcp_notification(request.context,
                                          create_result,
                                          notifier_method)
+	    self._tell_gluon(self.CREATE, create_result)
             return create_result
 
         def do_create(body, bulk=False, emulated=False):
@@ -556,6 +585,7 @@ class Controller(object):
         self._send_dhcp_notification(request.context,
                                      result,
                                      notifier_method)
+	self._tell_gluon(self.DELETE, {self._resource: {'id': id}})
 
     @db_api.retry_db_errors
     def update(self, request, id, body=None, **kwargs):
